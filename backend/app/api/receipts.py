@@ -1,3 +1,4 @@
+import os
 import uuid
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -5,21 +6,24 @@ from backend.app.compat import APIRouter, UploadFile, File, HTTPException, statu
 from backend.app.domain.receipt import (
     ReceiptRecord, ReceiptStatus, ReceiptStateMachine, ExpenseLine
 )
+from backend.app.domain.db import get_receipt_store, ReceiptStore
+from backend.app.domain.queue import get_receipt_queue, InterProcessQueue
 from backend.app.integrations.storage.base import LocalStorageAdapter
 
 router = APIRouter(prefix="/api/receipts", tags=["receipts"])
 
-# In-memory store for prototype demonstration
-RECEIPTS_DB: Dict[str, ReceiptRecord] = {}
-storage = LocalStorageAdapter(base_dir="./uploads-temp")
+# Persistent SQLite / SQLAlchemy store shared across processes
+RECEIPTS_DB: ReceiptStore = get_receipt_store()
+receipt_queue: InterProcessQueue = get_receipt_queue(queue_name=os.getenv("QUEUE_NAME", "receipt_ocr"))
+storage = LocalStorageAdapter(base_dir=os.getenv("STORAGE_DIR", "./uploads-temp"))
 
 
 @router.post("", status_code=status.HTTP_202_ACCEPTED)
 async def upload_receipt(file: UploadFile = File(...)) -> Dict[str, Any]:
-    """Uploads receipt image/PDF, stores in object storage, enqueues OCR job."""
+    """Uploads receipt image/PDF, stores in object storage, enqueues OCR job into persistent queue."""
     receipt_id = f"rcpt_{uuid.uuid4().hex[:12]}"
     file_bytes = await file.read()
-    
+
     # 1. Store in object storage
     storage_key = f"receipts/{datetime.utcnow().strftime('%Y/%m')}/{receipt_id}_{file.filename}"
     storage.store_file(storage_key, file_bytes)
@@ -31,14 +35,17 @@ async def upload_receipt(file: UploadFile = File(...)) -> Dict[str, Any]:
         image_storage_key=storage_key
     )
 
-    # 3. Transition to QUEUED state
+    # 3. Transition to QUEUED state and persist in DB
     record.status = ReceiptStateMachine.transition(record.status, ReceiptStatus.QUEUED)
     RECEIPTS_DB[receipt_id] = record
+
+    # 4. Enqueue into persistent inter-process queue
+    receipt_queue.enqueue(receipt_id)
 
     return {
         "receipt_id": receipt_id,
         "status": record.status.value,
-        "queue": "receipt_ocr",
+        "queue": receipt_queue.queue_name,
         "message": "Receipt accepted and queued for asynchronous OCR extraction."
     }
 
@@ -67,4 +74,5 @@ def approve_receipt(receipt_id: str) -> ReceiptRecord:
 
     record.status = ReceiptStateMachine.transition(record.status, ReceiptStatus.APPROVED)
     record.updated_at = datetime.utcnow()
+    RECEIPTS_DB[receipt_id] = record
     return record

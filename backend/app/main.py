@@ -1,4 +1,4 @@
-from backend.app.compat import FastAPI
+from backend.app.compat import FastAPI, CORSMiddleware
 from backend.app.api.health import router as health_router
 from backend.app.api.receipts import router as receipts_router
 

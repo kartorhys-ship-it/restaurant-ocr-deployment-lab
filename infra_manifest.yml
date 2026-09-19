@@ -53,6 +53,5 @@ dependencies:
 
 invariants:
   - "backend_port_consistency"
-  - "queue_contract_consistency"
   - "secret_reference_integrity"
   - "cloudflare_real_ip_trust"

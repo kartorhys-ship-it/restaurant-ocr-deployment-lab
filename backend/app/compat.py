@@ -30,7 +30,13 @@ except ImportError:
 # --- FastAPI / Starlette compatibility ---
 try:
     from fastapi import FastAPI, APIRouter, Response, UploadFile, File, HTTPException, status
+    from fastapi.middleware.cors import CORSMiddleware
 except ImportError:
+    class CORSMiddleware:
+        def __init__(self, app=None, **kwargs):
+            self.app = app
+            self.kwargs = kwargs
+
     class Response:
         def __init__(self, status_code: int = 200):
             self.status_code = status_code

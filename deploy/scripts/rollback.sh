@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Automated Reversible System Rollback Script
+# Reverts /srv/receipt-app/current/ symlink to previous release in /srv/receipt-app/releases/
 set -euo pipefail
 
 APP_ROOT="/srv/receipt-app"
