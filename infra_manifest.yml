@@ -1,0 +1,58 @@
+version: "1.0"
+project_name: "restaurant-ocr-deployment-lab"
+description: "Restaurant Receipt and OCR Expense Platform - Multi-Service Benchmark Application"
+
+services:
+  nginx:
+    type: reverse_proxy
+    listen_port: 80
+    ssl_port: 443
+    upstream:
+      name: receipt_api_backend
+      target: "http://127.0.0.1:8000"
+    config: "deploy/nginx/receipt-app.conf"
+
+  receipt_api:
+    type: http_service
+    framework: fastapi
+    bind_port: 8000
+    bind_host: "127.0.0.1"
+    workers: 2
+    supervisor_program: "receipt-api"
+    config: "deploy/supervisor/receipt-api.conf"
+    health_endpoint: "http://127.0.0.1:8000/api/health/ready"
+
+  receipt_worker:
+    type: background_worker
+    queue_broker: redis
+    queue_name: "receipt_ocr"
+    supervisor_program: "receipt-worker"
+    config: "deploy/supervisor/receipt-worker.conf"
+
+dependencies:
+  database:
+    type: postgresql
+    default_port: 5432
+    credential_ref: "<SECRET_REF_DATABASE_URL>"
+
+  queue:
+    type: redis
+    default_port: 6379
+    queue_name: "receipt_ocr"
+
+  object_storage:
+    type: s3_compatible
+    provider: cloudflare_r2
+    bucket: "restaurant-receipts"
+    credential_ref: "<SECRET_REF_R2_SECRET_KEY>"
+
+  ocr_engine:
+    type: external_api
+    provider: typhoon_ocr
+    credential_ref: "<SECRET_REF_OCR_API_KEY>"
+
+invariants:
+  - "backend_port_consistency"
+  - "queue_contract_consistency"
+  - "secret_reference_integrity"
+  - "cloudflare_real_ip_trust"
