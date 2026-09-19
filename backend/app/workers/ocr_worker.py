@@ -30,7 +30,8 @@ class ReceiptOCRWorker:
         ocr_provider: Optional[OCRProvider] = None,
         storage_adapter: Optional[LocalStorageAdapter] = None,
         store: Optional[ReceiptStore] = None,
-        queue: Optional[InterProcessQueue] = None
+        queue: Optional[InterProcessQueue] = None,
+        max_retries: Optional[int] = None
     ):
         self.queue_name = queue_name
         self.ocr = ocr_provider or MockOCRAdapter()
@@ -38,6 +39,7 @@ class ReceiptOCRWorker:
         self.storage = storage_adapter or LocalStorageAdapter(base_dir=storage_dir)
         self.db = store or get_receipt_store()
         self.queue = queue or get_receipt_queue(queue_name=self.queue_name)
+        self.max_retries = max_retries if max_retries is not None else int(os.getenv("MAX_RETRIES", "3"))
         self.running = False
 
     def process_single_receipt(self, receipt_id: str) -> Optional[ReceiptRecord]:
@@ -90,7 +92,7 @@ class ReceiptOCRWorker:
             return record
 
     def run_worker_loop(self, poll_interval: float = 1.0, max_iterations: Optional[int] = None):
-        """Worker execution loop consuming from queue with database fallback."""
+        """Worker execution loop consuming from queue with retry policy and database fallback."""
         logger.info("Starting OCR Worker loop on queue: '%s'...", self.queue_name)
         self.running = True
         iterations = 0
@@ -101,8 +103,35 @@ class ReceiptOCRWorker:
 
             if receipt_id:
                 logger.info("Dequeued job: %s", receipt_id)
-                self.process_single_receipt(receipt_id)
-                self.queue.mark_completed(receipt_id)
+                record = self.process_single_receipt(receipt_id)
+                if record and record.status in (ReceiptStatus.APPROVED, ReceiptStatus.REVIEW_REQUIRED, ReceiptStatus.PARSED):
+                    self.queue.mark_completed(receipt_id)
+                else:
+                    retries = self.queue.get_retry_count(receipt_id)
+                    if retries < self.max_retries:
+                        # Transition state machine: FAILED -> QUEUED
+                        if record and record.status == ReceiptStatus.FAILED:
+                            record.status = ReceiptStateMachine.transition(record.status, ReceiptStatus.QUEUED)
+                            self.db[receipt_id] = record
+                        new_retry_count = self.queue.mark_failed(
+                            receipt_id,
+                            error="OCR extraction failure; scheduled for retry",
+                            can_retry=True
+                        )
+                        logger.warning(
+                            "Receipt %s extraction failed; scheduled retry %d/%d",
+                            receipt_id, new_retry_count, self.max_retries
+                        )
+                    else:
+                        self.queue.mark_failed(
+                            receipt_id,
+                            error=f"Exceeded max retries ({self.max_retries})",
+                            can_retry=False
+                        )
+                        logger.error(
+                            "Receipt %s extraction permanently failed after %d retries",
+                            receipt_id, self.max_retries
+                        )
             else:
                 # Fallback path: check for any unconsumed QUEUED receipts in database
                 queued_records = [r.id for r in self.db.values() if r.status == ReceiptStatus.QUEUED]

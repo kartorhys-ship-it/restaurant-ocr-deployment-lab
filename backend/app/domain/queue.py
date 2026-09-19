@@ -134,6 +134,40 @@ class InterProcessQueue:
                     WHERE queue_name = ? AND payload = ? AND status = 'PROCESSING';
                 """, (utc_now_iso(), self.queue_name, payload))
 
+    def mark_failed(self, payload: str, error: str = "", can_retry: bool = False) -> int:
+        """Marks job as failed or re-enqueues for retry. Returns current retry count."""
+        now = utc_now_iso()
+        with self._connection() as conn:
+            with conn:
+                cursor = conn.execute("""
+                    SELECT id, retry_count FROM queue_jobs
+                    WHERE queue_name = ? AND payload = ? AND status = 'PROCESSING'
+                    ORDER BY id DESC LIMIT 1;
+                """, (self.queue_name, payload))
+                row = cursor.fetchone()
+                if not row:
+                    return 0
+                job_id = row["id"]
+                current_retries = (row["retry_count"] or 0) + 1
+                new_status = "PENDING" if can_retry else "FAILED"
+                conn.execute("""
+                    UPDATE queue_jobs
+                    SET status = ?, retry_count = ?, error_message = ?, updated_at = ?
+                    WHERE id = ?;
+                """, (new_status, current_retries, error, now, job_id))
+                return current_retries
+
+    def get_retry_count(self, payload: str) -> int:
+        """Retrieves retry count for a given payload."""
+        with self._connection() as conn:
+            cursor = conn.execute("""
+                SELECT retry_count FROM queue_jobs
+                WHERE queue_name = ? AND payload = ?
+                ORDER BY id DESC LIMIT 1;
+            """, (self.queue_name, payload))
+            row = cursor.fetchone()
+            return (row["retry_count"] or 0) if row else 0
+
     def pending_count(self) -> int:
         """Returns the number of pending items in the queue."""
         if self.redis_client:

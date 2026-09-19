@@ -68,6 +68,9 @@ def resolve_database_path() -> str:
         return os.getenv("DATABASE_PATH")
 
     # Production shared path if available
+    srv_data = Path("/srv/receipt-app/shared/data")
+    if srv_data.exists():
+        return str(srv_data / "receipts.db")
     srv_shared = Path("/srv/receipt-app/shared")
     if srv_shared.exists():
         return str(srv_shared / "receipts.db")
@@ -131,10 +134,21 @@ class SQLiteReceiptRepository:
                         queue_name TEXT NOT NULL,
                         payload TEXT NOT NULL,
                         status TEXT NOT NULL DEFAULT 'PENDING',
+                        retry_count INTEGER DEFAULT 0,
+                        error_message TEXT DEFAULT '',
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL
                     );
                 """)
+                # Migration check for existing databases
+                try:
+                    conn.execute("ALTER TABLE queue_jobs ADD COLUMN retry_count INTEGER DEFAULT 0;")
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    conn.execute("ALTER TABLE queue_jobs ADD COLUMN error_message TEXT DEFAULT '';")
+                except sqlite3.OperationalError:
+                    pass
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_receipts_status ON receipts(status);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_queue_lookup ON queue_jobs(queue_name, status);")
 

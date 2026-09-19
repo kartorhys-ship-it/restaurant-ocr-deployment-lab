@@ -15,10 +15,18 @@ import tempfile
 import shutil
 from pathlib import Path
 
-# Add fullstack-deployment-skill harness to path
-HARNESS_REPO = os.path.abspath(r"c:\Antigravity Projects\fullstack-deployment-skill")
-if HARNESS_REPO not in sys.path:
-    sys.path.insert(0, HARNESS_REPO)
+# Resolve fullstack-deployment-skill harness path across local and CI environments
+candidate_paths = [
+    os.getenv("HARNESS_PATH"),
+    str(Path(__file__).resolve().parents[3] / "fullstack-deployment-skill"),
+    str(Path(__file__).resolve().parents[2] / "fullstack-deployment-skill"),
+    r"c:\Antigravity Projects\fullstack-deployment-skill"
+]
+for cp in candidate_paths:
+    if cp and os.path.isdir(cp) and os.path.exists(os.path.join(cp, "harness", "core.py")):
+        if cp not in sys.path:
+            sys.path.insert(0, os.path.abspath(cp))
+        break
 
 from harness.core import DeploymentHarness
 from harness.policy import PolicyEngine, PolicyViolation

@@ -58,16 +58,20 @@ if [ ! -f "${NEW_RELEASE_PATH}/frontend/dist/index.html" ]; then
     exit 1
 fi
 
-# Sync Supervisor & Nginx service definitions if system directories exist
+# Sync Supervisor & Nginx service definitions and snippets
 if [ -d "/etc/supervisor/conf.d" ]; then
     echo "==> Updating supervisor configurations"
     sudo cp "${NEW_RELEASE_PATH}/deploy/supervisor/"*.conf /etc/supervisor/conf.d/
     sudo supervisorctl reread && sudo supervisorctl update
 fi
-if [ -d "/etc/nginx/sites-available" ]; then
-    echo "==> Updating nginx configurations"
-    sudo cp "${NEW_RELEASE_PATH}/deploy/nginx/receipt-app.conf" /etc/nginx/sites-available/
-    sudo ln -sfn /etc/nginx/sites-available/receipt-app.conf /etc/nginx/sites-enabled/receipt-app.conf 2>/dev/null || true
+if [ -d "/etc/nginx" ]; then
+    echo "==> Installing Nginx snippets and site configuration"
+    sudo mkdir -p /etc/nginx/snippets
+    sudo cp "${NEW_RELEASE_PATH}/deploy/nginx/security-headers.conf" /etc/nginx/snippets/security-headers.conf
+    if [ -d "/etc/nginx/sites-available" ]; then
+        sudo cp "${NEW_RELEASE_PATH}/deploy/nginx/receipt-app.conf" /etc/nginx/sites-available/
+        sudo ln -sfn /etc/nginx/sites-available/receipt-app.conf /etc/nginx/sites-enabled/receipt-app.conf
+    fi
 fi
 
 # 6. Retain previous pointer for atomic rollback
@@ -81,10 +85,30 @@ fi
 echo "==> Step 7: Atomic symlink switch -> ${NEW_RELEASE_PATH}"
 ln -sfn "${NEW_RELEASE_PATH}" "${CURRENT_LINK}"
 
-# 8. Graceful daemon reload
-echo "==> Step 8: Reloading application and proxy daemons"
-sudo supervisorctl restart receipt-api receipt-worker 2>/dev/null || true
-sudo nginx -t && sudo systemctl reload nginx 2>/dev/null || true
+# 8. Graceful daemon reload (Fail-Closed)
+echo "==> Step 8: Reloading application and proxy daemons (Fail-Closed)"
+if command -v supervisorctl >/dev/null 2>&1 && systemctl is-active --quiet supervisor 2>/dev/null; then
+    echo "    -> Restarting receipt-api and receipt-worker daemons"
+    if ! sudo supervisorctl restart receipt-api receipt-worker; then
+        echo "CRITICAL: Supervisor restart failed! Initiating rollback..."
+        "${NEW_RELEASE_PATH}/deploy/scripts/rollback.sh"
+        exit 1
+    fi
+fi
+
+if command -v nginx >/dev/null 2>&1 && systemctl is-active --quiet nginx 2>/dev/null; then
+    echo "    -> Testing Nginx syntax and reloading proxy"
+    if ! sudo nginx -t; then
+        echo "CRITICAL: Nginx configuration test failed! Initiating rollback..."
+        "${NEW_RELEASE_PATH}/deploy/scripts/rollback.sh"
+        exit 1
+    fi
+    if ! sudo systemctl reload nginx; then
+        echo "CRITICAL: Nginx daemon reload failed! Initiating rollback..."
+        "${NEW_RELEASE_PATH}/deploy/scripts/rollback.sh"
+        exit 1
+    fi
+fi
 
 # 9. Post-deployment health verification
 echo "==> Step 9: Post-deployment healthcheck probe"

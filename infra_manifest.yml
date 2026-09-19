@@ -31,8 +31,9 @@ services:
 
 dependencies:
   database:
-    type: postgresql
-    default_port: 5432
+    type: sqlite
+    database_path: "/srv/receipt-app/shared/data/receipts.db"
+    mode: wal
     credential_ref: "<SECRET_REF_DATABASE_URL>"
 
   queue:

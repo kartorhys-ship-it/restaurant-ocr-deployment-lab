@@ -109,6 +109,47 @@ class TestPersistenceAndQueue(unittest.TestCase):
         self.assertGreater(updated_record.total_amount, 0)
         self.assertEqual(self.queue.pending_count(), 0)
 
+    def test_worker_retry_lifecycle_on_ocr_failure(self):
+        """Validates that a failed OCR extraction retries up to max_retries before permanent failure."""
+        class BrokenOCRAdapter:
+            def extract_receipt(self, image_bytes, filename=""):
+                raise RuntimeError("OCR Engine Timeout / Failure")
+
+        self.storage.store_file("broken_scan.jpg", b"bad_image_data")
+        record = ReceiptRecord(
+            id="rcpt_retry_01",
+            status=ReceiptStatus.QUEUED,
+            image_storage_key="broken_scan.jpg"
+        )
+        self.store["rcpt_retry_01"] = record
+        self.queue.enqueue("rcpt_retry_01")
+
+        worker = ReceiptOCRWorker(
+            queue_name="test_queue",
+            ocr_provider=BrokenOCRAdapter(),
+            storage_adapter=self.storage,
+            store=self.store,
+            queue=self.queue,
+            max_retries=2
+        )
+
+        # Attempt 1: Fails -> re-queued (retry 1/2)
+        worker.run_worker_loop(poll_interval=0.05, max_iterations=1)
+        self.assertEqual(self.queue.get_retry_count("rcpt_retry_01"), 1)
+        rec1 = self.store.get("rcpt_retry_01")
+        self.assertEqual(rec1.status, ReceiptStatus.QUEUED)
+        self.assertEqual(self.queue.pending_count(), 1)
+
+        # Attempt 2: Fails -> re-queued (retry 2/2)
+        worker.run_worker_loop(poll_interval=0.05, max_iterations=1)
+        self.assertEqual(self.queue.get_retry_count("rcpt_retry_01"), 2)
+
+        # Attempt 3: Exceeds max_retries=2 -> marked FAILED permanently
+        worker.run_worker_loop(poll_interval=0.05, max_iterations=1)
+        rec_final = self.store.get("rcpt_retry_01")
+        self.assertEqual(rec_final.status, ReceiptStatus.FAILED)
+        self.assertEqual(self.queue.pending_count(), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
